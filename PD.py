@@ -508,7 +508,7 @@ def plot_paper(num_gen, gen_power_all, gen_alpha_all, gen_cap_individual, gen_pm
 
 if __name__ == '__main__':
     method = 'FICA' # FICA, CVAR, and ExactLHS. the method to reformulate the WDRJCC
-    N_WDR = 80 # the number of scenarios for the WDRJCC
+    N_WDR = 100 # the number of scenarios for the WDRJCC
     epsilon = 0.03 # the risk level. Use 0.06 for plotting Fig. 2
     theta = 1.3e-1 # the Wasserstein radius. Use 2.1e-1 for plotting Fig. 2
     num_gen = 2  # number of generators
