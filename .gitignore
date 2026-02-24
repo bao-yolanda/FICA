@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+fica_env/
+venv/
+env/
+ENV/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Results and data (large directories)
+PD_results_bigM100000_thread4/
+data/*.csv
+data/*.xlsx
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Memory and temporary files
+memory_usage.csv
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Environment
+activate_env.bat
+activate_env.sh
+conda_env/

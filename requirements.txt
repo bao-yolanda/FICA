@@ -1,0 +1,23 @@
+# FICA Project Dependencies
+# Python >= 3.9
+
+numpy==1.26.4
+pandas==2.2.2
+pandapower==2.14.6
+scipy==1.13.0
+scikit-learn==1.4.2
+matplotlib==3.8.4
+seaborn==0.13.2
+openpyxl==3.1.2
+joblib
+numba==0.59.1
+
+# Optimization solvers
+cvxpy==1.6.3
+cvxopt==1.3.2
+PICOS==2.4.17
+PYPOWER==5.1.16
+
+# Optional: Install if you have Gurobi license
+# gurobi==11.0.3
+# gurobi-logtools==3.1.0
