@@ -22,7 +22,7 @@ branch_info = ppci['branch']
 
 # Set randomness
 rng_fixed = np.random.RandomState(0)
-num_gen = 38
+num_gen = 10
 num_WT = 10
 
 bus_list = np.arange(bus_info.shape[0])

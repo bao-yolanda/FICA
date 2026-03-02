@@ -10,6 +10,8 @@ from WT_error_gen import WT_sce_gen
 import itertools
 from gurobipy import GRB
 from joblib import Parallel, delayed
+import json
+import datetime
 
 def solve_one_instance(param, save_path_root, bigM, thread):
     # this function solves the power system dispatch for a single parameter setting and random seed
@@ -23,18 +25,14 @@ def solve_one_instance(param, save_path_root, bigM, thread):
 
     MIPGap = 0.001
 
-    log_file_name = (f'{network_name}_theta{theta}_epsilon{epsilon}_gurobi_seed{gurobi_seed}'
-                     f'_num_gen{num_gen}_N_WDR{N_WDR}_load_scaling_factor{load_scaling_factor}_{method}_T{T}.txt')
-    log_file_name = os.path.join(save_path_root, log_file_name)
-    # remove the old log file if any
-    if os.path.exists(log_file_name):
-        # # skip the current run if the log file already exists
-        # return None
-        os.remove(log_file_name)
+    # 在并行环境中禁用Gurobi日志文件以避免文件写入冲突
+    # 日志文件会导致多个进程同时尝试写入同一个文件而失败
+    log_file_name = None
 
     result_dict_path = (f'result_{network_name}_theta{theta}_epsilon{epsilon}_gurobi_seed{gurobi_seed}'
                         f'_num_gen{num_gen}_N_WDR{N_WDR}_load_scaling_factor{load_scaling_factor}_{method}_T{T}.npy')
-    result_dict_path = os.path.join(save_path_root, result_dict_path)
+    # 使用绝对路径避免中文路径问题
+    result_dict_path = os.path.abspath(os.path.join(save_path_root, result_dict_path))
     # remove the old file if any
     if os.path.exists(result_dict_path):
         # # skip the current run if the result already exists
@@ -160,28 +158,72 @@ def solve_one_instance(param, save_path_root, bigM, thread):
     result_tuple = np.load(result_dict_path, allow_pickle=True).item()
 
 
+def save_param_config(bigM, thread, T_list, eps_theta_pair_list, gurobi_seed_list, num_gen_list, 
+                      N_WDR_list, load_scaling_factor_list, method_list, network_name_list, 
+                      norm_ord_list, save_path_root):
+    """Save parameter configuration to a JSON file for visualization"""
+    # Convert lists to serializable format
+    param_config = {
+        'timestamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'bigM': float(bigM),
+        'thread': int(thread),
+        'T_list': [int(t) for t in T_list],
+        'eps_theta_pair_list': eps_theta_pair_list,  # Already serializable
+        'gurobi_seed_list': [int(seed) for seed in gurobi_seed_list],
+        'num_gen_list': [int(n) for n in num_gen_list],
+        'N_WDR_list': [int(n) for n in N_WDR_list],
+        'load_scaling_factor_list': [float(f) for f in load_scaling_factor_list],
+        'method_list': method_list,
+        'network_name_list': network_name_list,
+        'norm_ord_list': [int(o) for o in norm_ord_list],
+        'Fgap': 0.001,
+        'timelimit': 3600
+    }
+
+    # Save to JSON file
+    param_config_path = os.path.join(save_path_root, 'param_config.json')
+    with open(param_config_path, 'w') as f:
+        json.dump(param_config, f, indent=4)
+    
+    print(f"Parameter configuration saved to: {param_config_path}")
+    return param_config_path
+
+
 def run_all_param():
     # this function runs the power system dispatch for all the parameter combinations
     bigM = 1e5  # this is only for "exact"
     thread = 4 # the number of threads for Gurobi solver
     n_jobs = 5 # higher than 10 would cause memory issues
     # ---------------------------------------------------------------------------------
-    T_list = [1]  # the number of time steps [8, 12, 16, 20, 24]
-    eps_theta_pair_list = [(0.03, 1e-3), (0.06, 1e-3)] # 
-    gurobi_seed_list = [i for i in range(10000*0, 10000*10, 10000)]
-    num_gen_list = [19]  # the number of thermal generators. 38 is the number of lines for case24_ieee_rts
-    N_WDR_list = [40, 80, 120]  # the number of scenarios for the WDRJCC
-    load_scaling_factor_list = [1, 1.5, 2.0]  # [1] the scaling factor for the load
-    method_list = ['FICA', 'ExactLHS']  # FICA, CVAR, and ExactLHS. the method to reformulate the WDRJCC
+    # PARAMETER SETTINGS FOR THE EXPERIMENT
+    # Modify these parameters to change the experiment configuration
+    T_list = [12, 14, 16, 18, 20]  # the number of time steps
+    eps_theta_pair_list = [(0.03, 2.5e-1), (0.03, 1.3e-1), (0.06, 4.2e-1), (0.06, 2.1e-1)]
+    gurobi_seed_list = [i for i in range(0, 10000*10, 10000)]
+    num_gen_list = [38]  # the number of thermal generators
+    N_WDR_list = [80]  # the number of scenarios for the WDRJCC
+    load_scaling_factor_list = [1]  # [1] the scaling factor for the load
+    method_list = ['FICA', 'CVAR']  # FICA, CVAR, and ExactLHS. the method to reformulate the WDRJCC
     network_name_list = ['case24_ieee_rts']
     norm_ord_list = [1] # norm for the Wasserstein distance. 1 for L1 norm, 2 for L2 norm, and np.inf for Linf norm
 
     # find the combination of all these parameters
     param_comb = list(itertools.product(network_name_list, load_scaling_factor_list, eps_theta_pair_list, T_list, num_gen_list, N_WDR_list, gurobi_seed_list, method_list, norm_ord_list))
 
-    save_path_root = os.path.join(os.getcwd(), f'PD_results_bigM{int(bigM)}_thread{int(thread)}')
+    save_path_root = os.path.abspath(os.path.join(os.getcwd(), f'PD_results_bigM{int(bigM)}_thread{int(thread)}'))
     if not os.path.exists(save_path_root):
         os.makedirs(save_path_root)
+
+    # Save parameter configuration for visualization
+    save_param_config(bigM, thread, T_list, eps_theta_pair_list, gurobi_seed_list, num_gen_list,
+                      N_WDR_list, load_scaling_factor_list, method_list, network_name_list,
+                      norm_ord_list, save_path_root)
+
+    print(f"Parameter configuration will be saved to: {save_path_root}")
+    print(f"Total number of parameter combinations: {len(param_comb)}")
+    print(f"Parameter combinations preview (first 3):")
+    for i, comb in enumerate(param_comb[:3]):
+        print(f"  {i+1}. network={comb[0]}, load_factor={comb[1]}, eps_theta={comb[2]}, T={comb[3]}, num_gen={comb[4]}, N_WDR={comb[5]}, seed={comb[6]}, method={comb[7]}, norm={comb[8]}")
 
     # solve the power system dispatch for all the combinations in parallel
     Parallel(n_jobs=n_jobs)(delayed(solve_one_instance)(param, save_path_root, bigM, thread) for param in param_comb)

@@ -23,18 +23,14 @@ def solve_one_instance(param, save_path_root, bigM, thread):
 
     MIPGap = 0.001
 
-    log_file_name = (f'{network_name}_theta{theta}_epsilon{epsilon}_gurobi_seed{gurobi_seed}'
-                     f'_num_gen{num_gen}_N_WDR{N_WDR}_load_scaling_factor{load_scaling_factor}_{method}_T{T}.txt')
-    log_file_name = os.path.join(save_path_root, log_file_name)
-    # remove the old log file if any
-    if os.path.exists(log_file_name):
-        # # skip the current run if the log file already exists
-        # return None
-        os.remove(log_file_name)
+    # 在并行环境中禁用Gurobi日志文件以避免文件写入冲突
+    # 日志文件会导致多个进程同时尝试写入同一个文件而失败
+    log_file_name = None
 
     result_dict_path = (f'result_{network_name}_theta{theta}_epsilon{epsilon}_gurobi_seed{gurobi_seed}'
                         f'_num_gen{num_gen}_N_WDR{N_WDR}_load_scaling_factor{load_scaling_factor}_{method}_T{T}.npy')
-    result_dict_path = os.path.join(save_path_root, result_dict_path)
+    # 使用绝对路径避免中文路径问题
+    result_dict_path = os.path.abspath(os.path.join(save_path_root, result_dict_path))
     # remove the old file if any
     if os.path.exists(result_dict_path):
         # # skip the current run if the result already exists
@@ -179,7 +175,7 @@ def run_all_param():
     # find the combination of all these parameters
     param_comb = list(itertools.product(network_name_list, load_scaling_factor_list, eps_theta_pair_list, T_list, num_gen_list, N_WDR_list, gurobi_seed_list, method_list, norm_ord_list))
 
-    save_path_root = os.path.join(os.getcwd(), f'PD_results_bigM{int(bigM)}_thread{int(thread)}')
+    save_path_root = os.path.abspath(os.path.join(os.getcwd(), f'PD_results_bigM{int(bigM)}_thread{int(thread)}'))
     if not os.path.exists(save_path_root):
         os.makedirs(save_path_root)
 
