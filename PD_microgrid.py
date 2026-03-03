@@ -132,19 +132,12 @@ def solve_PD(T, num_gen, num_WT, num_branch, load_bus_all, PTDF, gen_cap_individ
         
         # Storage constraints
         if storage_capacity > 0 and storage_power > 0:
-            # SOC update constraint
-            # When storage_p > 0 (discharge), SOC decreases by storage_p / sqrt(efficiency)
-            # When storage_p < 0 (charge), SOC increases by |storage_p| * sqrt(efficiency)
-            # Simplified: use efficiency factor for both directions
+
             prob.addConstr(storage_soc[t+1] == storage_soc[t] - storage_p[t] * dt / storage_efficiency)
-            
-            # Initial SOC constraint
+            prob.addConstr(storage_soc[T] == storage_capacity * storage_soc_init)
+
             if t == 0:
                 prob.addConstr(storage_soc[0] == storage_capacity * storage_soc_init)
-            
-            # SOC cycling constraint (end SOC = initial SOC)
-            if t == T - 1:
-                prob.addConstr(storage_soc[T] == storage_soc[0])
 
     # ---------------------------------------------------
     # joint chance constraint
@@ -238,8 +231,6 @@ def solve_PD(T, num_gen, num_WT, num_branch, load_bus_all, PTDF, gen_cap_individ
                 prob.addConstr(storage_power - storage_p[t] - storage_alpha[t] * WT_error_scenarios_train.sum(axis=-1)[N_p_minus,t] >= s - r[N_p_minus])
                 prob.addConstr(storage_power - storage_p[t] - q_p_plus_base * storage_alpha[t] >= s)
                 prob.addConstr(storage_power - storage_p[t] - q_p_minus_base * storage_alpha[t] >= s)
-                prob.addConstr(storage_power + storage_p[t] + storage_alpha[t] * WT_error_scenarios_train.sum(axis=-1)[N_p_plus,t] >= s - r[N_p_plus])
-                prob.addConstr(storage_power + storage_p[t] + storage_alpha[t] * WT_error_scenarios_train.sum(axis=-1)[N_p_minus,t] >= s - r[N_p_minus])
                 prob.addConstr(storage_power + storage_p[t] + q_p_plus_base * storage_alpha[t] >= s)
                 prob.addConstr(storage_power + storage_p[t] + q_p_minus_base * storage_alpha[t] >= s)
 
@@ -344,7 +335,6 @@ def solve_PD_instance(num_gen=38, num_WT=2, Tstart=0, norm_ord=1, T=24, method='
     N_samples_train = 1000 # the number of wind power scenarios used for training
     N_samples_test = 5000 # the number of wind power scenarios used for testing
     thread = 4
-
     MIPGap = 0.001
     gurobi_seed = 0
 
@@ -453,7 +443,7 @@ def solve_PD_instance(num_gen=38, num_WT=2, Tstart=0, norm_ord=1, T=24, method='
         print(f"Solver status description: {prob.StatusToString(prob.status)}")
         raise ValueError('The problem does not have a feasible solution.')
 
-    # Extract variable values after confirming solver status
+    # Extract variable values
     gen_power_all = gen_power_all.X
     gen_alpha_all = gen_alpha_all.X
 
@@ -472,7 +462,7 @@ def solve_PD_instance(num_gen=38, num_WT=2, Tstart=0, norm_ord=1, T=24, method='
     satisfied_rate = check_JCC(T, num_gen, num_branch, gen_power_all, gen_alpha_all, load_bus_all, PTDF, gen_cap_individual,
               gen_pmin_individual, WT_pred, WT_error_scenarios_test, P_line_limit, gen_bus_list, WT_bus_list)
 
-    # print the total power from generators, total reserve from generators, total load
+    # Print results summary
     print('------------------------------------')
     print(f'{network_name}, {num_gen} generators, {T}-step horizon')
     print(f'Risk level {epsilon}, radius {theta}, N_WDR {N_WDR}')
