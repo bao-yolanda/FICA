@@ -99,10 +99,8 @@ def solve_PD(T, num_gen, num_WT, num_branch, load_bus_all, PTDF, gen_cap_individ
     for t in range(T):
         # power balance constraint at time step t
         prob.addConstr(gen_power_all[t, :].sum() + WT_pred[t, :].sum() == load_bus_all[t, :].sum())
-
         # AGC constraints at time step t
         prob.addConstr(gen_alpha_all[t, :].sum() == 1)
-
         # first-stage power limit
         # pmax constraint
         prob.addConstr(gen_power_all[t, :] <= gen_cap_individual)
