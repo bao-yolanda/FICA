@@ -160,7 +160,7 @@ def solve_PD_instance(params: PDParams):
     WT_error_scenarios_test = WT_error_scenarios[N_samples_train:]
 
     # perform SUC
-    prob, gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha = solve_PD(
+    prob, gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha, wind_curtailment = solve_PD(
         params, num_branch, load_bus_all, PTDF, gen_cap_individual,
         gen_pmin_individual, WT_pred, WT_error_scenarios_train,
         P_line_limit, gen_bus_list, WT_bus_list, rng,
@@ -179,6 +179,7 @@ def solve_PD_instance(params: PDParams):
     storage_p = storage_p.X
     storage_soc = storage_soc.X
     storage_alpha = storage_alpha.X
+    wind_curtailment = wind_curtailment.X
 
     # Check power balance with tolerance
     tolerance = 1e-3
@@ -187,8 +188,9 @@ def solve_PD_instance(params: PDParams):
         gen_total = gen_power_all[t, :].sum()
         wind_total = WT_pred[t, :].sum()
         load_total = load_bus_all[t, :].sum()
+        wind_curtailment_total = wind_curtailment[t, :].sum()
         # Formula: gen + wind = load + storage (storage positive when charging)
-        balance = gen_total + wind_total - load_total - storage_p[t]
+        balance = gen_total + wind_total - wind_curtailment_total - load_total - storage_p[t]
         if abs(balance) > tolerance:
             balanced = False
             print(f"Power balance violation at t={t}:")
@@ -208,7 +210,7 @@ def solve_PD_instance(params: PDParams):
 
     # test JCC satisfaction rate
     storage_bus_list = [gen_bus_list[0]]
-    WT_error_scenario = WT_error_scenarios_test[0]  # use the first scenario to test the actual dispatch and JCC satisfaction
+    WT_error_scenario = WT_error_scenarios_test[1]  # use the first scenario to test the actual dispatch and JCC satisfaction
     gen_power_actual, gen_power_total_actual, storage_p_actual, storage_soc_actual, violation_info, fuel_cost_hourly, wind_curtailment_hourly, load_shedding_hourly = solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha,
                       T, WT_error_scenario, num_gen, gen_cap_individual, gen_pmin_individual,
                       storage_capacity, storage_power, storage_efficiency=0.95,
@@ -252,7 +254,7 @@ def solve_PD_instance(params: PDParams):
     # plot the results
     # plot_paper(num_gen, gen_power_all, gen_alpha_all, gen_cap_individual, gen_pmin_individual, WT_pred,
     #               WT_error_scenarios_test, method, epsilon, theta, network_name, T, gen_cost, storage_p, storage_soc, storage_alpha)
-    return load_bus_all, WT_pred, WT_error_scenario, gen_power_all, storage_p_actual, storage_soc_actual, fuel_cost_hourly, wind_curtailment_hourly, load_shedding_hourly
+    return load_bus_all, WT_pred, WT_error_scenario, gen_power_all, wind_curtailment, storage_p_actual, storage_soc_actual, fuel_cost_hourly, wind_curtailment_hourly, load_shedding_hourly
 
 if __name__ == '__main__':
     # Create parameter object
@@ -267,8 +269,8 @@ if __name__ == '__main__':
         norm_ord=1,
         T=24,
         load_scaling_factor=1,
-        storage_capacity=100.0,
-        storage_power=50.0,
+        storage_capacity=1000.0,
+        storage_power=500.0,
         storage_efficiency=0.95,
         storage_soc_init=0.5
     )

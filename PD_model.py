@@ -83,20 +83,23 @@ def solve_PD(params: PDParams, num_branch, load_bus_all, PTDF, gen_cap_individua
     gen_alpha_all = prob.addMVar((T, num_gen), lb=-GRB.INFINITY, ub=GRB.INFINITY, name="gen_alpha")
 
     # Storage variables (microgrid always has storage)
+
     storage_p = prob.addMVar(T, lb=-storage_power, ub=storage_power, name="storage_p")
     storage_alpha = prob.addMVar(T, lb=-GRB.INFINITY, ub=GRB.INFINITY, name="storage_alpha")
     storage_soc = prob.addMVar(T+1, lb=0, ub=storage_capacity, name="storage_soc")
+    # Wind curtailment variables (T, num_WT)
+    wind_curtailment = prob.addMVar((T, num_WT), lb=0, ub=WT_pred, name="wind_curtailment")
     dt = 1.0  # 1 hour time step
 
     for t in range(T):
         # power balance constraint at time step t
         if storage_capacity > 0:
-            prob.addConstr(gen_power_all[t, :].sum() + WT_pred[t, :].sum() - storage_p[t] == load_bus_all[t, :].sum())
+            prob.addConstr(gen_power_all[t, :].sum() + (WT_pred[t, :].sum() - wind_curtailment[t, :].sum()) - storage_p[t] == load_bus_all[t, :].sum())
             # AGC constraints at time step t
             # Generators and storage share the uncertainty response
             prob.addConstr(gen_alpha_all[t, :].sum() + storage_alpha[t] == 1)
         else:
-            prob.addConstr(gen_power_all[t, :].sum() + WT_pred[t, :].sum() == load_bus_all[t, :].sum())
+            prob.addConstr(gen_power_all[t, :].sum() + (WT_pred[t, :].sum() - wind_curtailment[t, :].sum()) == load_bus_all[t, :].sum())
             # AGC constraints at time step t (no storage)
             prob.addConstr(gen_alpha_all[t, :].sum() == 1)
 
@@ -225,12 +228,12 @@ def solve_PD(params: PDParams, num_branch, load_bus_all, PTDF, gen_cap_individua
         # main constraints
         if storage_capacity > 0:
             prob.addConstr(P_line_max[l] - (PTDF_gen[l] @ gen_power_all[t] - PTDF_gen[l] @ gen_alpha_all[t] * WT_error_scenarios_train.sum(axis=-1, keepdims=True)[N_WDR_indices,t].T)
-                                    - (PTDF_wind[l] @ WT_pred[t] + PTDF_wind[l] @ WT_error_scenarios_train[N_WDR_indices,t].T)
+                                    - (PTDF_wind[l] @ (WT_pred[t] - wind_curtailment[t]) + PTDF_wind[l] @ WT_error_scenarios_train[N_WDR_indices,t].T)
                                     + PTDF_storage[l] * (storage_p[t] + storage_alpha[t] * WT_error_scenarios_train.sum(axis=-1, keepdims=True)[N_WDR_indices,t].T)
                                     + PTDF_load[l] @ load_bus_all[t] >= s - r[N_WDR_indices])
         else:
             prob.addConstr(P_line_max[l] - (PTDF_gen[l] @ gen_power_all[t] - PTDF_gen[l] @ gen_alpha_all[t] * WT_error_scenarios_train.sum(axis=-1, keepdims=True)[N_WDR_indices,t].T)
-                                    - (PTDF_wind[l] @ WT_pred[t] + PTDF_wind[l] @ WT_error_scenarios_train[N_WDR_indices,t].T)
+                                    - (PTDF_wind[l] @ (WT_pred[t] - wind_curtailment[t]) + PTDF_wind[l] @ WT_error_scenarios_train[N_WDR_indices,t].T)
                                     + PTDF_load[l] @ load_bus_all[t] >= s - r[N_WDR_indices])
 
     # line min flow constraints
@@ -245,17 +248,20 @@ def solve_PD(params: PDParams, num_branch, load_bus_all, PTDF, gen_cap_individua
         # main constraints
         if storage_capacity > 0:
             prob.addConstr(-P_line_min[l] + (PTDF_gen[l] @ gen_power_all[t] - PTDF_gen[l] @ gen_alpha_all[t] * WT_error_scenarios_train.sum(axis=-1, keepdims=True)[N_WDR_indices,t].T)
-                                    + (PTDF_wind[l] @ WT_pred[t] + PTDF_wind[l] @ WT_error_scenarios_train[N_WDR_indices,t].T)
+                                    + (PTDF_wind[l] @ (WT_pred[t] - wind_curtailment[t]) + PTDF_wind[l] @ WT_error_scenarios_train[N_WDR_indices,t].T)
                                     - PTDF_storage[l] * (storage_p[t] + storage_alpha[t] * WT_error_scenarios_train.sum(axis=-1, keepdims=True)[N_WDR_indices,t].T)
                                     - PTDF_load[l] @ load_bus_all[t] >= s - r[N_WDR_indices])
         else:
             prob.addConstr(-P_line_min[l] + (PTDF_gen[l] @ gen_power_all[t] - PTDF_gen[l] @ gen_alpha_all[t] * WT_error_scenarios_train.sum(axis=-1, keepdims=True)[N_WDR_indices,t].T)
-                                    + (PTDF_wind[l] @ WT_pred[t] + PTDF_wind[l] @ WT_error_scenarios_train[N_WDR_indices,t].T)
+                                    + (PTDF_wind[l] @ (WT_pred[t] - wind_curtailment[t]) + PTDF_wind[l] @ WT_error_scenarios_train[N_WDR_indices,t].T)
                                     - PTDF_load[l] @ load_bus_all[t] >= s - r[N_WDR_indices])
 # ---------------------------------------------------
     # Define the cost (objective) function
     # fuel cost for all generators
     FC = gen_cost * gen_power_all + gen_cost_quadra * gen_power_all ** 2
+    # wind curtailment cost
+    wind_curtailment_cost = getattr(params, 'wind_curtailment_cost', 0.0)
+    WC = wind_curtailment_cost * wind_curtailment.sum()
 
     # storage cost (wear and tear cost)
     if storage_capacity > 0:
@@ -263,9 +269,9 @@ def solve_PD(params: PDParams, num_branch, load_bus_all, PTDF, gen_cap_individua
         prob.addConstr(storage_p_abs >= storage_p)
         prob.addConstr(storage_p_abs >= -storage_p)
         SC = storage_cost_coeff * storage_p_abs
-        prob.setObjective(FC.sum() + SC.sum(), GRB.MINIMIZE)
+        prob.setObjective(FC.sum() + SC.sum() + WC, GRB.MINIMIZE)
     else:
-        prob.setObjective(FC.sum(), GRB.MINIMIZE)
+        prob.setObjective(FC.sum() + WC, GRB.MINIMIZE)
     print(f'spent {time.time() - t_start} seconds to build the model.')
     # Solve the problem
     # set MIP gap
@@ -290,7 +296,7 @@ def solve_PD(params: PDParams, num_branch, load_bus_all, PTDF, gen_cap_individua
 
     prob.optimize()
 
-    return prob, gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha
+    return prob, gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha, wind_curtailment
 
 
 def solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha,
@@ -381,76 +387,21 @@ def solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storag
         gen_power_adjusted = gen_power_initial + gen_alpha_all[t, :] * Delta_W_t
         storage_p_adjusted = storage_p_initial + storage_alpha[t] * Delta_W_t
 
-        # ===== 1. 检查发电机容量限制 =====
-        gen_violated = False
-        for g in range(num_gen):
-            # 检查是否超过上界
-            if gen_power_adjusted[g] > gen_cap_individual[g]:
-                violation_info['gen_violations'].append({
-                    't': t, 'g': g,
-                    'type': 'over_cap',
-                    'power': gen_power_adjusted[g],
-                    'limit': gen_cap_individual[g]
-                })
-                gen_violated = True
-            # 检查是否低于下界
-            elif gen_power_adjusted[g] < gen_pmin_individual[g]:
-                violation_info['gen_violations'].append({
-                    't': t, 'g': g,
-                    'type': 'under_min',
-                    'power': gen_power_adjusted[g],
-                    'limit': gen_pmin_individual[g]
-                })
-                gen_violated = True
+        gen_power_actual[t, :] = np.clip(gen_power_adjusted, gen_pmin_individual, gen_cap_individual)
+        storage_p_actual[t] = np.clip(storage_p_adjusted, -storage_power, storage_power)
 
-        # ===== 2. 检查储能功率限制 =====
-        storage_power_violated = False
-        if abs(storage_p_adjusted) > storage_power:
-            violation_info['storage_power_violations'].append({
-                't': t,
-                'power': storage_p_adjusted,
-                'limit': storage_power
-            })
-            storage_power_violated = True
+        # 检查修正后的SOC
+        storage_soc_next_corrected = storage_soc_actual[t] + storage_p_actual[t] 
+        storage_soc_actual[t+1] = np.clip(storage_soc_next_corrected, 0, storage_capacity)
 
-        # ===== 3. 检查SOC限制（考虑时间相关性）=====
-        storage_soc_next = storage_soc_actual[t] + storage_p_adjusted / storage_efficiency
-        storage_soc_violated = False
-        if storage_soc_next > storage_capacity:
-            violation_info['storage_soc_violations'].append({
-                't': t,
-                'type': 'over_capacity',
-                'soc': storage_soc_next,
-                'limit': storage_capacity
-            })
-            storage_soc_violated = True
-        elif storage_soc_next < 0:
-            violation_info['storage_soc_violations'].append({
-                't': t,
-                'type': 'under_min',
-                'soc': storage_soc_next,
-                'limit': 0
-            })
-            storage_soc_violated = True
-
-        # ===== 4. 如果有违约，进行修正 =====
-        if gen_violated or storage_power_violated or storage_soc_violated:
-            # 修正策略：将功率调整限制在可行范围内
-            gen_power_actual[t, :] = np.clip(gen_power_adjusted, gen_pmin_individual, gen_cap_individual)
-            storage_p_actual[t] = np.clip(storage_p_adjusted, -storage_power, storage_power)
-
-            # 检查修正后的SOC
-            storage_soc_next_corrected = storage_soc_actual[t] + storage_p_actual[t] / storage_efficiency
-            storage_soc_actual[t+1] = np.clip(storage_soc_next_corrected, 0, storage_capacity)
-
-            # 调整储能功率以适应SOC限制
-            if storage_soc_actual[t+1] != storage_soc_next_corrected:
-                storage_p_actual[t] = (storage_soc_actual[t+1] - storage_soc_actual[t]) * storage_efficiency
+        # 调整储能功率以适应SOC限制
+        if storage_soc_actual[t+1] != storage_soc_next_corrected:
+            storage_p_actual[t] = (storage_soc_actual[t+1] - storage_soc_actual[t]) * storage_efficiency
         else:
             # 无违约，直接使用调整后的功率
             gen_power_actual[t, :] = gen_power_adjusted
             storage_p_actual[t] = storage_p_adjusted
-            storage_soc_actual[t+1] = storage_soc_next
+            storage_soc_actual[t+1] = storage_soc_next_corrected
 
         # ===== 5. 检查功率平衡（如果数据齐全） =====
         if load_total is not None and WT_pred_total is not None:            
@@ -479,6 +430,6 @@ def solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storag
 
     # 计算总功率
     gen_power_total_actual = np.sum(gen_power_actual, axis=1)
-    plot_power_balance(load_total, WT_actual, gen_power_total_actual, storage_p_actual, T,  save_dir='results', save_name='power_balance.png')
+    plot_power_balance(load_total, WT_actual, WT_pred_total, gen_power_total_actual, storage_p_actual, load_shedding_hourly, wind_curtailment_hourly, T,  save_dir='results', save_name='power_balance.png')
 
     return gen_power_actual, gen_power_total_actual, storage_p_actual, storage_soc_actual, violation_info, fuel_cost_hourly, wind_curtailment_hourly, load_shedding_hourly 
