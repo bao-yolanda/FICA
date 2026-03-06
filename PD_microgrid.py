@@ -7,10 +7,11 @@ import os
 from gurobipy import GRB
 from WT_error_gen import WT_sce_gen
 from scipy.linalg import norm
-from PD_model import solve_PD
+from PD_model import solve_PD, solve_PD_actual
+from PD_param import PDParams
 from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
-from PD_plot import plot_paper
+from PD_plot import plot_paper, plot_power_balance
 plt.style.use('default')
 plt.rcParams.update({
     'font.size': 13,
@@ -60,19 +61,26 @@ def check_JCC(T, num_gen, num_branch, gen_power_all, gen_alpha_all, load_bus_all
 
 
 
-def solve_PD_instance(num_gen=38, num_WT=2, Tstart=0, norm_ord=1, T=24, method='FICA', N_WDR=100, epsilon=0.05, theta=1.5e-1, load_scaling_factor=1,
-                     storage_capacity=0, storage_power=0, storage_efficiency=0.95, storage_soc_init=0.5):
-    N_samples_train = 1000 # the number of wind power scenarios used for training
-    N_samples_test = 5000 # the number of wind power scenarios used for testing
-    thread = 4
-    MIPGap = 0.001
-    gurobi_seed = 0
+def solve_PD_instance(params: PDParams):
+    '''Solve power dispatch with given parameters'''
+    T = params.T
+    Tstart = params.Tstart
+    num_gen = params.num_gen
+    num_WT = params.num_WT
+    method = params.method
+    N_WDR = params.N_WDR
+    epsilon = params.epsilon
+    theta = params.theta
+    load_scaling_factor = params.load_scaling_factor
+    storage_capacity = params.storage_capacity
+    storage_power = params.storage_power
 
-    network_name = 'case5' 
-    gen_cap_total_prop = 1 # scale the total generation capacity of the network data
+    N_samples_train = params.N_samples_train
+    N_samples_test = params.N_samples_test
+    gurobi_seed = params.gurobi_seed
 
-    bigM =1e5 # this is only for "exact"
-    log_file_name = None # the log file name
+    network_name = params.network_name
+    gen_cap_total_prop = params.gen_cap_total_prop
     #------------------
 
     network_dict = {'case118': ppnw.case118(),
@@ -98,6 +106,7 @@ def solve_PD_instance(num_gen=38, num_WT=2, Tstart=0, norm_ord=1, T=24, method='
     # duplicate the network load to make it two days
     network_load = np.tile(network_load, 2)
     network_load = network_load[Tstart:Tstart+T]
+    print("Network load : ", network_load.sum())
 
     # -------------------------------------
     pp.rundcpp(network)
@@ -118,6 +127,7 @@ def solve_PD_instance(num_gen=38, num_WT=2, Tstart=0, norm_ord=1, T=24, method='
 
     ###### set generator capacity
     gen_cap_total = load_total * gen_cap_total_prop  # the total generation capacity
+    print('gen_cap_total:', gen_cap_total)
     gen_cap_individual = gen_cap_total / num_gen  # the individual generation capacity
     # add some randomness when assigning the generation capacity to each generator
     gen_cap_individual = rng_fixed.uniform(0.6, 1.4, num_gen) * gen_cap_individual
@@ -138,6 +148,7 @@ def solve_PD_instance(num_gen=38, num_WT=2, Tstart=0, norm_ord=1, T=24, method='
     P_line_limit = np.clip(P_line_limit, 0, 2 * load_total)
 
     WT_total = 0.6 * load_total
+    print("Total wind: ", WT_total)
     WT_individual = WT_total / num_WT
     # load the wind power scenarios, which is decomposed into prediction and error scenarios
     WT_pred, WT_error_scenarios, WT_full_scenarios = WT_sce_gen(num_WT, N_samples_train + N_samples_test)
@@ -149,20 +160,13 @@ def solve_PD_instance(num_gen=38, num_WT=2, Tstart=0, norm_ord=1, T=24, method='
     WT_error_scenarios_test = WT_error_scenarios[N_samples_train:]
 
     # perform SUC
-    input_param_dict = {'T': T, 'num_gen': num_gen, 'num_WT': num_WT, 'num_branch': num_branch,
-                        'load_bus_all': load_bus_all, 'PTDF': PTDF, 'gen_cap_individual': gen_cap_individual,
-                        'gen_pmin_individual': gen_pmin_individual, 'WT_pred': WT_pred,
-                        'WT_error_scenarios_train': WT_error_scenarios_train, 'P_line_limit': P_line_limit,
-                        'gen_bus_list': gen_bus_list, 'WT_bus_list': WT_bus_list, 'N_WDR': N_WDR, 'epsilon': epsilon,
-                        'thread': thread,
-                        'theta': theta, 'method': method, 'MIPGap': MIPGap, 'gen_cost': gen_cost,
-                        'gen_cost_quadra': gen_cost_quadra, 'bigM': bigM, 'gurobi_seed': gurobi_seed,
-                        'log_file_name': log_file_name, 'rng': rng, "norm_ord": norm_ord,
-                        'storage_capacity': storage_capacity, 'storage_power': storage_power, 
-                        'storage_efficiency': storage_efficiency, 'storage_soc_init': storage_soc_init}
-    
-    # Call solve_PD
-    prob, gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha = solve_PD(**input_param_dict)
+    prob, gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha = solve_PD(
+        params, num_branch, load_bus_all, PTDF, gen_cap_individual,
+        gen_pmin_individual, WT_pred, WT_error_scenarios_train,
+        P_line_limit, gen_bus_list, WT_bus_list, rng,
+        gen_cost, gen_cost_quadra
+    )
+
 
     # Check the status of the solution first
     if prob.status not in [GRB.Status.OPTIMAL, GRB.Status.TIME_LIMIT, GRB.Status.SUBOPTIMAL]:
@@ -176,13 +180,45 @@ def solve_PD_instance(num_gen=38, num_WT=2, Tstart=0, norm_ord=1, T=24, method='
     storage_soc = storage_soc.X
     storage_alpha = storage_alpha.X
 
+    # Check power balance with tolerance
+    tolerance = 1e-3
+    balanced = True
+    for t in range(T):
+        gen_total = gen_power_all[t, :].sum()
+        wind_total = WT_pred[t, :].sum()
+        load_total = load_bus_all[t, :].sum()
+        # Formula: gen + wind = load + storage (storage positive when charging)
+        balance = gen_total + wind_total - load_total - storage_p[t]
+        if abs(balance) > tolerance:
+            balanced = False
+            print(f"Power balance violation at t={t}:")
+            print(f"  Gen total: {gen_total:.6f}")
+            print(f"  Wind total: {wind_total:.6f}")
+            print(f"  Load total: {load_total:.6f}")
+            print(f"  Storage: {storage_p[t]:.6f} (positive=charging)")
+            print(f"  Balance error: {balance:.6f}")
+            print(f"  Expected: gen+wind = load+storage")
+            print(f"  Left side: {gen_total + wind_total:.6f}")
+            print(f"  Right side: {load_total + storage_p[t]:.6f}")
+    
+    if not balanced:
+        raise ValueError(f"Power balance not satisfied (tolerance {tolerance})")
+    
     t_solve = prob.Runtime
 
     # test JCC satisfaction rate
     storage_bus_list = [gen_bus_list[0]]
-    satisfied_rate = check_JCC(T, num_gen, num_branch, gen_power_all, gen_alpha_all, load_bus_all, PTDF, gen_cap_individual,
-              gen_pmin_individual, WT_pred, WT_error_scenarios_test, P_line_limit, gen_bus_list, WT_bus_list,
-              storage_p, storage_alpha, storage_bus_list)
+    WT_error_scenario = WT_error_scenarios_test[0]  # use the first scenario to test the actual dispatch and JCC satisfaction
+    gen_power_actual, gen_power_total_actual, storage_p_actual, storage_soc_actual, violation_info, fuel_cost_hourly, wind_curtailment_hourly, load_shedding_hourly = solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha,
+                      T, WT_error_scenario, num_gen, gen_cap_individual, gen_pmin_individual,
+                      storage_capacity, storage_power, storage_efficiency=0.95,
+                      load_bus_all=load_bus_all, WT_pred=WT_pred,
+                      gen_cost=gen_cost, gen_cost_quadra=gen_cost_quadra)
+    # plot_power_balance(load_bus_all, WT_error_scenario + WT_pred, gen_power_actual, storage_p_actual,
+    #                    T, scenario_idx=0, save_dir='figure/test', save_name='power_balance')
+    # satisfied_rate = check_JCC(T, num_gen, num_branch, gen_power_all, gen_alpha_all, load_bus_all, PTDF, gen_cap_individual,
+    #           gen_pmin_individual, WT_pred, WT_error_scenarios_test, P_line_limit, gen_bus_list, WT_bus_list,
+    #           storage_p, storage_alpha, storage_bus_list)
 
     # Print results summary
     print('------------------------------------')
@@ -190,72 +226,50 @@ def solve_PD_instance(num_gen=38, num_WT=2, Tstart=0, norm_ord=1, T=24, method='
     print(f'Risk level {epsilon}, radius {theta}, N_WDR {N_WDR}')
     print(f'Storage: {storage_capacity} MWh capacity, ±{storage_power} MW power')
     print('')
-    print(f'the objective value is {prob.objVal}, the out-of-sample JCC rate is {satisfied_rate*100}%')
+    # print(f'the objective value is {prob.objVal}, the out-of-sample JCC rate is {satisfied_rate*100}%')
     print(f'The method used is {method}')
     print(f'The computing time for solving the dispatch is {t_solve} seconds')
     print(f'Storage energy used: {storage_p.sum():.2f} MWh (discharge positive, charge negative)')
     print(f'Storage SOC range: [{storage_soc.min():.2f}, {storage_soc.max():.2f}] MWh')
     print(f'Storage alpha range: [{storage_alpha.min():.4f}, {storage_alpha.max():.4f}]')
     print('')
+    # 计算并打印燃油花销、弃风、削负荷
+    if fuel_cost_hourly is not None:
+        total_fuel_cost = fuel_cost_hourly.sum()
+        print(f'Total fuel cost: {total_fuel_cost:.2f} USD')
+        print(f'Hourly fuel cost (USD): {fuel_cost_hourly}')
+    else:
+        print('Fuel cost not calculated (gen_cost or gen_cost_quadra missing)')
+    total_wind_curtailment = wind_curtailment_hourly.sum()
+    total_load_shedding = load_shedding_hourly.sum()
+    print(f'Total wind curtailment: {total_wind_curtailment:.6f} MW')
+    print(f'Hourly wind curtailment (MW): {wind_curtailment_hourly}')
+    print(f'Total load shedding: {total_load_shedding:.6f} MW')
+    print(f'Hourly load shedding (MW): {load_shedding_hourly}')
     print('------------------------------------')
     # plot the results
-    plot_paper(num_gen, gen_power_all, gen_alpha_all, gen_cap_individual, gen_pmin_individual, WT_pred,
-                  WT_error_scenarios_test, method, epsilon, theta, network_name, T, gen_cost, storage_p, storage_soc, storage_alpha)
-
-def plot_all_gen(num_gen, gen_power_all, gen_alpha_all, gen_cap_individual, gen_pmin_individual, WT_pred,
-                  WT_error_scenarios_test, method, epsilon, theta, network_name, T, gen_cost):
-    rng = np.random.RandomState(0)  # fixed random seed for reproducibility
-    # pick 5 generators to plot, unless there are less than 5 generators
-    num_plot_gen = min(5, num_gen)
-    # pick random num_plot_gen from 60% generators with the smallest cost, unless there are less than num_plot_gen generators
-    top_pick = max(int(0.6 * num_gen), num_plot_gen)
-    plot_gen_index = rng.choice(np.argsort(gen_cap_individual)[:top_pick], num_plot_gen, replace=False)
-    # make plot for three out-of-sample scenarios
-    num_plot_sce = 3
-    fig, axs = plt.subplots(num_plot_gen, num_plot_sce, figsize=(5*num_plot_sce, 2 * num_plot_gen))
-    for i in range(3):
-        ax = axs[:, i]
-        for ig, g in enumerate(plot_gen_index):
-            # plot the first-stage power output
-            x = np.arange(T)
-            ax[ig].step(x, gen_power_all[:, g], label='first-stage')
-            # plot the actual power output
-            ax[ig].step(x, gen_power_all[:, g] - gen_alpha_all[:, g] * WT_error_scenarios_test[i].sum(axis=-1), label='actual')
-            # set x-axis label
-            ax[ig].set_xlabel('hour')
-            # plot Pmin and Pmax as dashed lines
-            ax[ig].axhline(gen_pmin_individual[g], color='black', linestyle='--')
-            ax[ig].axhline(gen_cap_individual[g], color='black', linestyle='--')
-            ax[ig].legend()
-            ax[ig].set_title(f'scenario {i}, {method}, generator {g}, eps {epsilon}, theta {theta}')
-    plt.tight_layout()
-    # save figure to figure/test folder
-    save_dir = os.path.join(os.getcwd(), 'figure', 'test')
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-    save_name = os.path.join(save_dir, f'{network_name}_{num_gen}gen_T{T}_{method}_eps{epsilon}_theta{theta}.png')
-    plt.savefig(save_name, dpi=300)
-    plt.show()
+    # plot_paper(num_gen, gen_power_all, gen_alpha_all, gen_cap_individual, gen_pmin_individual, WT_pred,
+    #               WT_error_scenarios_test, method, epsilon, theta, network_name, T, gen_cost, storage_p, storage_soc, storage_alpha)
+    return load_bus_all, WT_pred, WT_error_scenario, gen_power_all, storage_p_actual, storage_soc_actual, fuel_cost_hourly, wind_curtailment_hourly, load_shedding_hourly
 
 if __name__ == '__main__':
-    method = 'CVAR' # FICA, CVAR, and ExactLHS. the method to reformulate the WDRJCC
-    N_WDR = 100 # the number of scenarios for the WDRJCC
-    epsilon = 0.03 # the risk level. Use 0.06 for plotting Fig. 2
-    theta = 1.3e-1 # the Wasserstein radius. Use 2.1e-1 for plotting Fig. 2
-    num_gen = 3  # number of generators
-    Tstart = 0  # start time index
-    norm_ord = 1  # norm order for the WDRJCC
-    T = 24  # time horizon in hours
-    load_scaling_factor = 1 # the scaling factor for the load
-
-    # Storage parameters (microgrid always has storage)
-    storage_capacity = 50.0  # MWh (total energy capacity)
-    storage_power = 20.0    # MW (max charge/discharge power)
-    storage_efficiency = 0.95  # round-trip efficiency
-    storage_soc_init = 0.5    # initial SOC (50%)
+    # Create parameter object
+    params = PDParams(
+        network_name='case5',
+        method='CVAR',
+        N_WDR=100,
+        epsilon=0.03,
+        theta=1.3e-1,
+        num_gen=3,
+        Tstart=0,
+        norm_ord=1,
+        T=24,
+        load_scaling_factor=1,
+        storage_capacity=100.0,
+        storage_power=25.0,
+        storage_efficiency=0.95,
+        storage_soc_init=0.5
+    )
 
     # Run with storage
-    solve_PD_instance(num_gen=num_gen, Tstart=Tstart, norm_ord=norm_ord, T=T, method=method, N_WDR=N_WDR,
-                     epsilon=epsilon, theta=theta, load_scaling_factor=load_scaling_factor,
-                     storage_capacity=storage_capacity, storage_power=storage_power,
-                     storage_efficiency=storage_efficiency, storage_soc_init=storage_soc_init)
+    solve_PD_instance(params)
