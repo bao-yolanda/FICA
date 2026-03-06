@@ -106,7 +106,6 @@ def solve_PD_instance(params: PDParams):
     # duplicate the network load to make it two days
     network_load = np.tile(network_load, 2)
     network_load = network_load[Tstart:Tstart+T]
-    print("Network load : ", network_load.sum())
 
     # -------------------------------------
     pp.rundcpp(network)
@@ -122,6 +121,7 @@ def solve_PD_instance(params: PDParams):
     load_bus_size = bus_info[:, 2] * load_scaling_factor
 
     load_total = np.sum(load_bus_size)
+    print('load_total:', load_total)
     # we then get the load curves at all buses, using the network_load curve
     load_bus_all = load_bus_size.reshape(1, -1) * network_load.reshape(-1, 1)
 
@@ -147,7 +147,7 @@ def solve_PD_instance(params: PDParams):
     # clip on 2 times of the total load to avoid numerical issues
     P_line_limit = np.clip(P_line_limit, 0, 2 * load_total)
 
-    WT_total = 0.6 * load_total
+    WT_total = params.WT_total_ratio * load_total
     print("Total wind: ", WT_total)
     WT_individual = WT_total / num_WT
     # load the wind power scenarios, which is decomposed into prediction and error scenarios
@@ -241,11 +241,13 @@ def solve_PD_instance(params: PDParams):
     else:
         print('Fuel cost not calculated (gen_cost or gen_cost_quadra missing)')
     total_wind_curtailment = wind_curtailment_hourly.sum()
+    wind_cur_rate = total_wind_curtailment / (WT_pred.sum() + WT_error_scenario.sum())
     total_load_shedding = load_shedding_hourly.sum()
+    load_cur_rate = total_load_shedding / load_bus_all.sum()
     print(f'Total wind curtailment: {total_wind_curtailment:.6f} MW')
-    print(f'Hourly wind curtailment (MW): {wind_curtailment_hourly}')
     print(f'Total load shedding: {total_load_shedding:.6f} MW')
-    print(f'Hourly load shedding (MW): {load_shedding_hourly}')
+    print(f'Wind curtailment rate: {wind_cur_rate:.2%}')
+    print(f'Load shedding rate: {load_cur_rate:.2%}')
     print('------------------------------------')
     # plot the results
     # plot_paper(num_gen, gen_power_all, gen_alpha_all, gen_cap_individual, gen_pmin_individual, WT_pred,
@@ -266,7 +268,7 @@ if __name__ == '__main__':
         T=24,
         load_scaling_factor=1,
         storage_capacity=100.0,
-        storage_power=25.0,
+        storage_power=50.0,
         storage_efficiency=0.95,
         storage_soc_init=0.5
     )

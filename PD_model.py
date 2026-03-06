@@ -3,6 +3,7 @@ from gurobipy import GRB
 import numpy as np
 import time
 from PD_param import PDParams
+from PD_plot import plot_comparison, plot_power_balance, plot_all_gen, plot_paper
 
 def dual_norm_constr(prob, lhs, rhs, norm_ord=2):
     # this is for lhs >= ||rhs||_norm*
@@ -275,6 +276,7 @@ def solve_PD(params: PDParams, num_branch, load_bus_all, PTDF, gen_cap_individua
     # # fix seed
     prob.setParam('Seed', gurobi_seed)
     prob.setParam('Threads', thread)
+    prob.setParam('OutputFlag', 0)  # 禁止求解器输出到控制台
     if log_file_name is not None:
         prob.setParam('LogFile', log_file_name)
 
@@ -363,14 +365,14 @@ def solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storag
     # 初始化输出指标
     fuel_cost_hourly = np.zeros(T) if gen_cost is not None and gen_cost_quadra is not None else None
     wind_curtailment_hourly = np.zeros(T)
+    WT_actual = np.zeros(T)
     load_shedding_hourly = np.zeros(T)
-
     tolerance = 1e-3
 
     for t in range(T):
         # 实际风电误差
         Delta_W_t = np.sum(WT_error_scenario[t, :])  # 总误差
-
+        WT_actual[t] = WT_pred_total[t] + Delta_W_t if WT_pred_total is not None else None
         # 计算初始调整功率（按照AGC分配）
         gen_power_initial = gen_power_all[t, :].X if hasattr(gen_power_all[t, 0], 'X') else gen_power_all[t, :]
         storage_p_initial = storage_p[t].X if hasattr(storage_p[t], 'X') else storage_p[t]
@@ -451,13 +453,11 @@ def solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storag
             storage_soc_actual[t+1] = storage_soc_next
 
         # ===== 5. 检查功率平衡（如果数据齐全） =====
-        if load_total is not None and WT_pred_total is not None:
-            # 实际总风电 = 预测 + 误差
-            wind_actual = WT_pred_total[t] + Delta_W_t
+        if load_total is not None and WT_pred_total is not None:            
             # 实际总发电机功率
             gen_total_actual = gen_power_actual[t, :].sum()
             # 功率平衡： gen + wind = load + storage (storage正为充电，消耗功率)
-            balance = gen_total_actual + wind_actual - load_total[t] - storage_p_actual[t]
+            balance = gen_total_actual + WT_actual[t] - load_total[t] - storage_p_actual[t]
             # 计算弃风和削负荷
             if balance > tolerance:
                 wind_curtailment_hourly[t] = balance  # 正平衡视为弃风
@@ -479,6 +479,6 @@ def solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storag
 
     # 计算总功率
     gen_power_total_actual = np.sum(gen_power_actual, axis=1)
-    
+    plot_power_balance(load_total, WT_actual, gen_power_total_actual, storage_p_actual, T,  save_dir='results', save_name='power_balance.png')
 
     return gen_power_actual, gen_power_total_actual, storage_p_actual, storage_soc_actual, violation_info, fuel_cost_hourly, wind_curtailment_hourly, load_shedding_hourly 
