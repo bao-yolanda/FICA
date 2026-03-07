@@ -160,7 +160,7 @@ def solve_PD_instance(params: PDParams):
     WT_error_scenarios_test = WT_error_scenarios[N_samples_train:]
 
     # perform SUC
-    prob, gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha, wind_curtailment = solve_PD(
+    prob, gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha, wind_curtailment, grid_buy, grid_sell = solve_PD(
         params, num_branch, load_bus_all, PTDF, gen_cap_individual,
         gen_pmin_individual, WT_pred, WT_error_scenarios_train,
         P_line_limit, gen_bus_list, WT_bus_list, rng,
@@ -180,6 +180,8 @@ def solve_PD_instance(params: PDParams):
     storage_soc = storage_soc.X
     storage_alpha = storage_alpha.X
     wind_curtailment = wind_curtailment.X
+    grid_buy = grid_buy.X
+    grid_sell = grid_sell.X
 
     # Check power balance with tolerance
     tolerance = 1e-3
@@ -189,8 +191,8 @@ def solve_PD_instance(params: PDParams):
         wind_total = WT_pred[t, :].sum()
         load_total = load_bus_all[t, :].sum()
         wind_curtailment_total = wind_curtailment[t, :].sum()
-        # Formula: gen + wind = load + storage (storage positive when charging)
-        balance = gen_total + wind_total - wind_curtailment_total - load_total - storage_p[t]
+        # Formula: gen + wind + grid_buy - grid_sell = load + storage (storage positive when charging)
+        balance = gen_total + wind_total - wind_curtailment_total + grid_buy[t] - grid_sell[t] - load_total - storage_p[t]
         if abs(balance) > tolerance:
             balanced = False
             print(f"Power balance violation at t={t}:")
@@ -198,9 +200,11 @@ def solve_PD_instance(params: PDParams):
             print(f"  Wind total: {wind_total:.6f}")
             print(f"  Load total: {load_total:.6f}")
             print(f"  Storage: {storage_p[t]:.6f} (positive=charging)")
+            print(f"  Grid buy: {grid_buy[t]:.6f}")
+            print(f"  Grid sell: {grid_sell[t]:.6f}")
             print(f"  Balance error: {balance:.6f}")
-            print(f"  Expected: gen+wind = load+storage")
-            print(f"  Left side: {gen_total + wind_total:.6f}")
+            print(f"  Expected: gen+wind+grid_buy-grid_sell = load+storage")
+            print(f"  Left side: {gen_total + wind_total + grid_buy[t] - grid_sell[t]:.6f}")
             print(f"  Right side: {load_total + storage_p[t]:.6f}")
     
     if not balanced:
@@ -211,13 +215,43 @@ def solve_PD_instance(params: PDParams):
     # test JCC satisfaction rate
     storage_bus_list = [gen_bus_list[0]]
     WT_error_scenario = WT_error_scenarios_test[1]  # use the first scenario to test the actual dispatch and JCC satisfaction
-    gen_power_actual, gen_power_total_actual, storage_p_actual, storage_soc_actual, violation_info, fuel_cost_hourly, wind_curtailment_hourly, load_shedding_hourly = solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha,
+    
+    # Load TOU prices for plotting and actual dispatch
+    use_tou_pricing = getattr(params, 'use_tou_pricing', False)
+    tou_price_file = getattr(params, 'tou_price_file', 'data/tou_price.csv')
+    if use_tou_pricing:
+        try:
+            import pandas as pd
+            tou_data = pd.read_csv(tou_price_file)
+            # Ensure we have T periods
+            if len(tou_data) >= T:
+                tou_buy_price = tou_data['price_usd_per_mwh'].values[:T]  # buying price from grid
+                tou_sell_price = tou_buy_price * 0.7  # selling price to grid (typically lower)
+            else:
+                print(f"Warning: TOU price file has {len(tou_data)} rows, but T={T}. Using default prices.")
+                tou_buy_price = np.ones(T) * 40.0  # default 40 USD/MWh
+                tou_sell_price = np.ones(T) * 28.0  # default 28 USD/MWh (70% of buy price)
+        except Exception as e:
+            print(f"Warning: Failed to load TOU price file {tou_price_file}: {e}. Using default prices.")
+            tou_buy_price = np.ones(T) * 40.0
+            tou_sell_price = np.ones(T) * 28.0
+    else:
+        tou_buy_price = np.ones(T) * 40.0  # default flat price
+        tou_sell_price = np.ones(T) * 28.0  # default flat selling price
+    
+    gen_power_actual, gen_power_total_actual, storage_p_actual, storage_soc_actual, violation_info, fuel_cost_hourly, wind_curtailment_hourly, load_shedding_hourly, grid_buy_actual, grid_sell_actual = solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha,
                       T, WT_error_scenario, num_gen, gen_cap_individual, gen_pmin_individual,
                       storage_capacity, storage_power, storage_efficiency=0.95,
+                      grid_buy=grid_buy, grid_sell=grid_sell,
                       load_bus_all=load_bus_all, WT_pred=WT_pred,
-                      gen_cost=gen_cost, gen_cost_quadra=gen_cost_quadra)
-    # plot_power_balance(load_bus_all, WT_error_scenario + WT_pred, gen_power_actual, storage_p_actual,
-    #                    T, scenario_idx=0, save_dir='figure/test', save_name='power_balance')
+                      gen_cost=gen_cost, gen_cost_quadra=gen_cost_quadra,
+                      tou_buy_price=tou_buy_price, tou_sell_price=tou_sell_price)
+    
+    plot_power_balance(load_bus_all.sum(axis=1), (WT_error_scenario + WT_pred).sum(axis=1), WT_pred.sum(axis=1),
+                      gen_power_actual, storage_p_actual, load_shedding_hourly, wind_curtailment_hourly, T,
+                      scenario_idx=0, save_dir='figure/test', save_name='power_balance',
+                      grid_buy=grid_buy_actual, grid_sell=grid_sell_actual,
+                      tou_buy_price=tou_buy_price, tou_sell_price=tou_sell_price)
     # satisfied_rate = check_JCC(T, num_gen, num_branch, gen_power_all, gen_alpha_all, load_bus_all, PTDF, gen_cap_individual,
     #           gen_pmin_individual, WT_pred, WT_error_scenarios_test, P_line_limit, gen_bus_list, WT_bus_list,
     #           storage_p, storage_alpha, storage_bus_list)
@@ -239,7 +273,7 @@ def solve_PD_instance(params: PDParams):
     if fuel_cost_hourly is not None:
         total_fuel_cost = fuel_cost_hourly.sum()
         print(f'Total fuel cost: {total_fuel_cost:.2f} USD')
-        print(f'Hourly fuel cost (USD): {fuel_cost_hourly}')
+        # print(f'Hourly fuel cost (USD): {fuel_cost_hourly}')
     else:
         print('Fuel cost not calculated (gen_cost or gen_cost_quadra missing)')
     total_wind_curtailment = wind_curtailment_hourly.sum()
@@ -254,10 +288,10 @@ def solve_PD_instance(params: PDParams):
     # plot the results
     # plot_paper(num_gen, gen_power_all, gen_alpha_all, gen_cap_individual, gen_pmin_individual, WT_pred,
     #               WT_error_scenarios_test, method, epsilon, theta, network_name, T, gen_cost, storage_p, storage_soc, storage_alpha)
-    return load_bus_all, WT_pred, WT_error_scenario, gen_power_all, wind_curtailment, storage_p_actual, storage_soc_actual, fuel_cost_hourly, wind_curtailment_hourly, load_shedding_hourly
+    return load_bus_all, WT_pred, WT_error_scenario, gen_power_all, wind_curtailment, storage_p_actual, storage_soc_actual, fuel_cost_hourly, wind_curtailment_hourly, load_shedding_hourly, grid_buy_actual, grid_sell_actual
 
 if __name__ == '__main__':
-    # Create parameter object
+    # Create parameter object (grid-connected microgrid with TOU pricing)
     params = PDParams(
         network_name='case5',
         method='CVAR',
@@ -269,10 +303,15 @@ if __name__ == '__main__':
         norm_ord=1,
         T=24,
         load_scaling_factor=1,
-        storage_capacity=1000.0,
-        storage_power=500.0,
+        storage_capacity=500.0,
+        storage_power=250.0,
         storage_efficiency=0.95,
-        storage_soc_init=0.5
+        storage_soc_init=0.5,
+        grid_buy_max=500.0,  # MW
+        grid_sell_max=500.0,  # MW
+        grid_bus=0,
+        use_tou_pricing=True,
+        tou_price_file='data/tou_price.csv'
     )
 
     # Run with storage

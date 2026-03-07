@@ -72,11 +72,40 @@ def solve_PD(params: PDParams, num_branch, load_bus_all, PTDF, gen_cap_individua
     storage_soc_init = params.storage_soc_init
     storage_cost_coeff = params.storage_cost_coeff
     gurobi_seed = params.gurobi_seed
+    
+    # Grid connection parameters
+    grid_buy_max = getattr(params, 'grid_buy_max', 0.0)
+    grid_sell_max = getattr(params, 'grid_sell_max', 0.0)
+    grid_bus = getattr(params, 'grid_bus', 0)
+    use_tou_pricing = getattr(params, 'use_tou_pricing', False)
+    tou_price_file = getattr(params, 'tou_price_file', 'data/tou_price.csv')
 
     # set small PTDF to zero to avoid numerical issues
     PTDF[np.abs(PTDF) < 1e-5] = 0
 
     t_start = time.time()
+    
+    # Load TOU prices if enabled
+    if use_tou_pricing:
+        try:
+            import pandas as pd
+            tou_data = pd.read_csv(tou_price_file)
+            # Ensure we have T periods
+            if len(tou_data) >= T:
+                tou_buy_price = tou_data['price_usd_per_mwh'].values[:T]  # buying price from grid
+                tou_sell_price = tou_buy_price * 0.7  # selling price to grid (typically lower)
+            else:
+                print(f"Warning: TOU price file has {len(tou_data)} rows, but T={T}. Using default prices.")
+                tou_buy_price = np.ones(T) * 40.0  # default 40 USD/MWh
+                tou_sell_price = np.ones(T) * 28.0  # default 28 USD/MWh (70% of buy price)
+        except Exception as e:
+            print(f"Warning: Failed to load TOU price file {tou_price_file}: {e}. Using default prices.")
+            tou_buy_price = np.ones(T) * 40.0
+            tou_sell_price = np.ones(T) * 28.0
+    else:
+        tou_buy_price = np.ones(T) * 40.0  # default flat price
+        tou_sell_price = np.ones(T) * 28.0  # default flat selling price
+    
     prob = gp.Model('ED')
     # Multiple generator variables (T, num_gen)
     gen_power_all = prob.addMVar((T, num_gen), lb=-GRB.INFINITY, ub=GRB.INFINITY, name="gen_power")
@@ -89,17 +118,22 @@ def solve_PD(params: PDParams, num_branch, load_bus_all, PTDF, gen_cap_individua
     storage_soc = prob.addMVar(T+1, lb=0, ub=storage_capacity, name="storage_soc")
     # Wind curtailment variables (T, num_WT)
     wind_curtailment = prob.addMVar((T, num_WT), lb=0, ub=WT_pred, name="wind_curtailment")
+    
+    # Grid connection variables (T,)
+    grid_buy = prob.addMVar(T, lb=0, ub=grid_buy_max, name="grid_buy")  # power purchased from grid
+    grid_sell = prob.addMVar(T, lb=0, ub=grid_sell_max, name="grid_sell")  # power sold to grid
+    
     dt = 1.0  # 1 hour time step
 
     for t in range(T):
-        # power balance constraint at time step t
+        # power balance constraint at time step t (grid-connected)
         if storage_capacity > 0:
-            prob.addConstr(gen_power_all[t, :].sum() + (WT_pred[t, :].sum() - wind_curtailment[t, :].sum()) - storage_p[t] == load_bus_all[t, :].sum())
+            prob.addConstr(gen_power_all[t, :].sum() + (WT_pred[t, :].sum() - wind_curtailment[t, :].sum()) - storage_p[t] + grid_buy[t] - grid_sell[t] == load_bus_all[t, :].sum())
             # AGC constraints at time step t
-            # Generators and storage share the uncertainty response
+            # Generators and storage share the uncertainty response (grid does not participate)
             prob.addConstr(gen_alpha_all[t, :].sum() + storage_alpha[t] == 1)
         else:
-            prob.addConstr(gen_power_all[t, :].sum() + (WT_pred[t, :].sum() - wind_curtailment[t, :].sum()) == load_bus_all[t, :].sum())
+            prob.addConstr(gen_power_all[t, :].sum() + (WT_pred[t, :].sum() - wind_curtailment[t, :].sum()) + grid_buy[t] - grid_sell[t] == load_bus_all[t, :].sum())
             # AGC constraints at time step t (no storage)
             prob.addConstr(gen_alpha_all[t, :].sum() == 1)
 
@@ -263,15 +297,18 @@ def solve_PD(params: PDParams, num_branch, load_bus_all, PTDF, gen_cap_individua
     wind_curtailment_cost = getattr(params, 'wind_curtailment_cost', 0.0)
     WC = wind_curtailment_cost * wind_curtailment.sum()
 
+    # grid transaction cost (buying from grid is cost, selling to grid is revenue)
+    grid_cost = tou_buy_price @ grid_buy - tou_sell_price @ grid_sell
+
     # storage cost (wear and tear cost)
     if storage_capacity > 0:
         storage_p_abs = prob.addMVar(T, lb=0, ub=storage_power, name="storage_p_abs")
         prob.addConstr(storage_p_abs >= storage_p)
         prob.addConstr(storage_p_abs >= -storage_p)
         SC = storage_cost_coeff * storage_p_abs
-        prob.setObjective(FC.sum() + SC.sum() + WC, GRB.MINIMIZE)
+        prob.setObjective(FC.sum() + SC.sum() + WC + grid_cost, GRB.MINIMIZE)
     else:
-        prob.setObjective(FC.sum() + WC, GRB.MINIMIZE)
+        prob.setObjective(FC.sum() + WC + grid_cost, GRB.MINIMIZE)
     print(f'spent {time.time() - t_start} seconds to build the model.')
     # Solve the problem
     # set MIP gap
@@ -296,13 +333,15 @@ def solve_PD(params: PDParams, num_branch, load_bus_all, PTDF, gen_cap_individua
 
     prob.optimize()
 
-    return prob, gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha, wind_curtailment
+    return prob, gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha, wind_curtailment, grid_buy, grid_sell
 
 
 def solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storage_alpha,
                       T, WT_error_scenario, num_gen, gen_cap_individual, gen_pmin_individual,
                       storage_capacity, storage_power, storage_efficiency=0.95,
-                      load_bus_all=None, WT_pred=None, gen_cost=None, gen_cost_quadra=None):
+                      grid_buy=None, grid_sell=None,
+                      load_bus_all=None, WT_pred=None, gen_cost=None, gen_cost_quadra=None,
+                      tou_buy_price=None, tou_sell_price=None):
     """
     实时调度：根据实际风电误差调整功率，并对越限进行限制，确保功率平衡。
     计算燃油花销、弃风、削负荷等指标。
@@ -317,10 +356,14 @@ def solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storag
         storage_capacity: 储能容量
         storage_power: 储能功率限制
         storage_efficiency: 储能效率
+        grid_buy: 计划从电网购电功率 (T,)，如果为None，则设为0。
+        grid_sell: 计划向电网售电功率 (T,)，如果为None，则设为0。
         load_bus_all: 各母线负荷 (T, num_bus) 或总负荷 (T,)。如果为None，则跳过功率平衡检查。
         WT_pred: 风电预测 (T, num_WT) 或总预测 (T,)。如果为None，则跳过功率平衡检查。
         gen_cost: 发电机线性成本系数 (num_gen,)，用于计算燃油花销。如果为None，则跳过燃油花销计算。
         gen_cost_quadra: 发电机二次成本系数 (num_gen,)，用于计算燃油花销。如果为None，则跳过燃油花销计算。
+        tou_buy_price: 分时购电价格 (T,)，如果为None，则使用默认价格。
+        tou_sell_price: 分时售电价格 (T,)，如果为None，则使用默认价格。
 
     Returns:
         gen_power_actual: 实际发电机功率 (T, num_gen)
@@ -331,12 +374,32 @@ def solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storag
         fuel_cost_hourly: 每小时燃油花销 (T,)，如果gen_cost和gen_cost_quadra提供；否则为None。
         wind_curtailment_hourly: 每小时弃风量 (T,)，正数表示弃风。
         load_shedding_hourly: 每小时削负荷量 (T,)，正数表示削负荷。
+        grid_buy_actual: 实际从电网购电功率 (T,)
+        grid_sell_actual: 实际向电网售电功率 (T,)
     """
 
     # 存储所有时刻的实际功率
     gen_power_actual = np.zeros((T, num_gen))
     storage_p_actual = np.zeros(T)
     storage_soc_actual = np.zeros(T+1)
+    
+    # 处理grid交易（如果未提供则设为0）
+    if grid_buy is None:
+        grid_buy_actual = np.zeros(T)
+    else:
+        # 提取变量值（如果是Gurobi变量）
+        if hasattr(grid_buy[0], 'X'):
+            grid_buy_actual = np.array([gb.X for gb in grid_buy])
+        else:
+            grid_buy_actual = grid_buy.copy()
+    
+    if grid_sell is None:
+        grid_sell_actual = np.zeros(T)
+    else:
+        if hasattr(grid_sell[0], 'X'):
+            grid_sell_actual = np.array([gs.X for gs in grid_sell])
+        else:
+            grid_sell_actual = grid_sell.copy()
 
     # 初始化SOC
     storage_soc_actual[0] = storage_soc[0].X if hasattr(storage_soc[0], 'X') else storage_soc[0]
@@ -407,8 +470,8 @@ def solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storag
         if load_total is not None and WT_pred_total is not None:            
             # 实际总发电机功率
             gen_total_actual = gen_power_actual[t, :].sum()
-            # 功率平衡： gen + wind = load + storage (storage正为充电，消耗功率)
-            balance = gen_total_actual + WT_actual[t] - load_total[t] - storage_p_actual[t]
+            # 功率平衡： gen + wind + grid_buy - grid_sell = load + storage (storage正为充电，消耗功率)
+            balance = gen_total_actual + WT_actual[t] + grid_buy_actual[t] - grid_sell_actual[t] - load_total[t] - storage_p_actual[t]
             # 计算弃风和削负荷
             if balance > tolerance:
                 wind_curtailment_hourly[t] = balance  # 正平衡视为弃风
@@ -430,6 +493,11 @@ def solve_PD_actual(gen_power_all, gen_alpha_all, storage_p, storage_soc, storag
 
     # 计算总功率
     gen_power_total_actual = np.sum(gen_power_actual, axis=1)
-    plot_power_balance(load_total, WT_actual, WT_pred_total, gen_power_total_actual, storage_p_actual, load_shedding_hourly, wind_curtailment_hourly, T,  save_dir='results', save_name='power_balance.png')
+    # Plot power balance including grid transactions
+    if load_total is not None and WT_pred_total is not None:
+        plot_power_balance(load_total, WT_actual, WT_pred_total, gen_power_total_actual, storage_p_actual, 
+                          load_shedding_hourly, wind_curtailment_hourly, T, save_dir='results', save_name='power_balance',
+                          grid_buy=grid_buy_actual, grid_sell=grid_sell_actual,
+                          tou_buy_price=tou_buy_price, tou_sell_price=tou_sell_price)
 
-    return gen_power_actual, gen_power_total_actual, storage_p_actual, storage_soc_actual, violation_info, fuel_cost_hourly, wind_curtailment_hourly, load_shedding_hourly 
+    return gen_power_actual, gen_power_total_actual, storage_p_actual, storage_soc_actual, violation_info, fuel_cost_hourly, wind_curtailment_hourly, load_shedding_hourly, grid_buy_actual, grid_sell_actual 
